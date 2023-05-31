@@ -1,0 +1,52 @@
+#!/bin/bash
+
+if [ -n "$1" ];then
+	ssh -t $1 'if [ -f /bin/dnf -o -f /usr/bin/dnf ];then IST="dnf"; else if [ -f /bin/yum -o -f /usr/bin/yum ];then IST="yum"; else if [ -f /usr/apt-get -o -f /usr/bin/apt-get ];then IST="apt-get"; else echo "Error: package installer not found."; exit 1; fi; fi; fi; if [ ! -f /bin/git ];then sudo $IST -y update; sudo $IST -y install git; fi; if [ ! -f /bin/which -a ! -f /usr/bin/which ];then sudo \$IST -y install which; fi; if [ -d "./docker_prevolume" ]; then git-force-clone  https://github.com/Yougain/docker_prevolume.git ~/docker_prevolume; else git clone https://github.com/Yougain/docker_prevolume.git; fi; ./docker_prevolume/'${0##*/}'; exit $?'
+	exit $?
+fi
+
+
+if [ -f /bin/zsh ];then
+	echo "zsh installed. exit."
+	exit 1
+fi
+
+
+APKG_R="redhat-rpm-config epel-release glibc-locale-source langpacks-en glibc-langpack-en"
+if [ -f /bin/dnf -o -f /usr/bin/dnf ];then
+	IST="dnf"
+	DVP="devel"
+	APKG="$APKG_R"
+else
+	if [ -f /bin/yum -o -f /usr/bin/yum ];then
+		IST="yum"
+		DVP="devel"
+		APKG="$APKG_R"
+	else
+		if [ -f /usr/apt-get -o -f /usr/bin/apt-get ];then
+	        IST="apt-get"
+			DVP="dev"
+		else
+			echo "Error: package installer not found."
+			exit 1
+		fi
+	fi
+fi
+if [ ! -f /bin/git -a ! -f /usr/bin/git ];then
+	sudo $IST -y install git
+fi
+
+if [ ! -f /bin/which -a ! -f /usr/bin/which ];then
+    sudo $IST -y install which
+fi
+
+
+sudo $IST -y install vim ruby zsh make gcc ruby-$DVP git git-extras ncurses-$DVP $APKG
+sudo gem install binding_of_caller curses
+sudo gem install -N YkLib
+#git-force-clone  https://github.com/Yougain/docker_prevolume.git ~/docker_prevolume
+
+
+sudo cp $HOME/docker_prevolume/{dexec,create_docker_prevolume,docker_volumes.rb} /usr/bin
+
+
