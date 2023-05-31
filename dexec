@@ -1,0 +1,459 @@
+#!/usr/bin/env ruby
+
+def die msg
+	STDERR.write(msg.chomp + "\n")
+	exit 1
+end
+
+if Process.euid != 0
+	exec "sudo", $0, *ARGV
+end
+
+
+require 'fileutils'
+require "#{File.dirname(File.expand_path(__FILE__))}/docker_volumes"
+require 'shellwords'
+require 'set'
+
+
+DUM_EP = 'ENTRYPOINT ["/bin/tail", "-f", "/dev/null"]' + "\n"
+PROFILING_D = "for_profiling"
+MOUNT_HOST = %W{/dev /proc /sys}
+
+DPATH = {
+	"mount" 	=> MOUNT_HOST + %W{/home /var/mail /var/spool/mail /usr/share/terminfo},
+	"ignore" 	=> %W{/},
+	"dir" 		=> %W{/etc/skel}
+}
+
+REAL_OBJ_MODE = %W{dir rename write file}
+MISSING_OBJ_MODE = %W{noent erased}
+OBJ_MODE = REAL_OBJ_MODE + MISSING_OBJ_MODE
+LOADERS = ["ld-linux-x86-64.so", "ld.so"]
+
+if ARGV[0] == "--get-profile"
+	if ARGV[1] == "--clean"
+		clean = true
+		ARGV.shift
+	end
+	CMD_NAME = File.basename(ARGV[1])
+	fork do
+		if !File.directory? PROFILING_D
+			new = true
+			FileUtils.mkpath PROFILING_D
+			FileUtils.cp "Dockerfile", PROFILING_D
+			lns = IO.read(PROFILING_D + "/Dockerfile").lines
+		end
+		Dir.chdir PROFILING_D
+		pImage = "#{Mount::ImageName}-for_profile"
+		if new
+			unless lns.detect{ _1 =~ /^ENTRYPOINT\b/ } ==  DUM_EP
+				IO.write "Dockerfile", lns.join.sub(/(^ENTRYPOINT.*?$)|\Z/, DUM_EP)
+			end
+			fork do
+				lns.select{ _1 =~ /^COPY\b/ }.each do |ln|
+					src = ln.split[1]
+					if src[0] == "/"
+						src = src[1..-1]
+					end
+					Mount.mkpath File.dirname(src), File.basename(src)
+					FileUtils.cp_r "../" + src, ".", remove_destination: true, preserve: true
+				end
+			end
+			Process.waitpid
+			system *%W{docker buildx build --load -t #{pImage} .}
+			system *%W{docker run --name #{pImage} -d #{pImage}}
+		end
+		silentDocker = -> cmd {
+			cmd = cmd.gsub!(/\%i/, pImage) || cmd + " " + pImage
+			cmdline = cmd.split.unshift("docker")
+			c = cmdline[1..-1].detect{_1 =~ /^[^-]/}
+			fr, fw = IO.pipe
+			pid = fork do
+				fr.close
+				STDOUT.reopen(fw)
+				if !exec *cmdline
+					die "cannot #{c} docker."
+				end
+			end
+			fw.close
+			wait = 0.1
+			loop do
+				res, = IO.select([fr], [], [], wait)
+				if res
+					if wait == 30
+						print "done.\x1b[m\n"
+						STDOUT.flush
+					end
+					str = fr.readpartial(256) rescue ""
+					if str =~ /^#{Regexp.escape pImage}|[0-9a-f]+\b/
+						print $'.lstrip
+					else
+						print str
+					end
+					STDOUT.flush
+					break
+				else
+					break if wait == 30
+					wait = 30
+					print "\x1b[36mwaiting docker command 'docker #{cmd} #{pImage}' ... "
+					STDOUT.flush
+					next
+				end
+			end
+			begin
+				while true
+					print fr.readpartial(256)
+					STDOUT.flush
+				end
+			rescue EOFError
+			end
+			Process.wait pid
+			if Process.last_status.to_i != 0
+				die "cannot #{c} docker."
+			end
+		}
+		begin
+			mno = ""
+			while mno.size < 10
+				mno = rand(10000000000).to_s
+			end
+			if clean
+				silentDocker["stop"]
+				garbages = `docker container ls -a|grep #{pImage.gsub(/[^A-Za-z0-9_-]/,'')}|awk '{print $1}'`.gsub(/\s+/," ").strip
+				system "docker container rm #{garbages}" if !garbages.empty?
+				silentDocker["buildx build --load -t %i ."]
+				silentDocker["run --name %i -d %i"]
+			else
+				silentDocker["start"]
+			end
+			pid = fork do
+				exec *%W{docker exec -it #{pImage} bash -c #{"sleep #{mno} 2>/dev/null;" + Shellwords.shelljoin(ARGV[1..-1])}}
+			end
+			while (IO.read("/proc/#{pid}/cmdline") rescue "") !~ /^docker/
+				sleep 0.1
+			end
+			sleep 0.1
+			if kid = Dir.children("/proc").detect{(IO.read("/proc/#{_1}/cmdline") rescue "") =~ /(^|bin\/)sleep.*#{mno}/}
+				if wpid = IO.read("/proc/#{kid}/status")[/^PPid:\s+(\d+)/, 1].to_i
+					fork do
+						fr, fw = IO.pipe
+						spid = fork do
+							fr.close
+							STDERR.reopen fw
+							exec *%W{sudo strace -v -f -o ./strace.info -p #{wpid}}
+						end
+						fw.close
+						fr.readline
+						system *%W{sudo kill -s SIGINT #{kid}}
+						Process.waitpid
+						root = eval(`docker inspect #{pImage}`.gsub(/null/, "nil"))[0][:GraphDriver][:Data][:MergedDir]
+						cmd = 'sudo ruby -e '"'"'
+							IO.foreach "./strace.info" do |ln|
+								lno = ln
+								cnt = 0
+								enoent = ln =~ / ENOENT \(No such file or directory\)$/
+								while ln =~ /\"(\/.*?)\"/
+									fName = $1
+									ln = $~.post_match
+									if File.exist?("' + root + '" + fName)
+										if File.directory?("' + root + '" + fName)
+											mode = "' + OBJ_MODE[0] + '" # "dir"
+										elsif lno =~ /^\d+\srename\(/ && cnt == 1
+											mode = "' + OBJ_MODE[1] + '" # "reaname"
+										elsif lno =~ /O_WRONLY|O_RDWR/
+											mode = "' + OBJ_MODE[2] + '" # "write"
+										else
+											mode = "' + OBJ_MODE[3] + '" # "file"
+										end
+									elsif enoent
+										mode = "' + OBJ_MODE[4] + '" # "noent"
+									else
+										mode = "' + OBJ_MODE[5] + '" # "erased"
+									end
+									print mode + " " + fName + "\n"
+									cnt += 1
+								end
+							end
+						'"'"
+						profile = nil
+						IO.popen cmd do |r|
+							profile = r.read
+						end
+						fList = Hash.new{|h, k| h[k] = []}
+						profile.lines.each do |ln|
+							ln =~ / /
+							m = $`
+							f = $'.strip
+							fList[m].push f
+							if m == "write"
+								fList["file"].push f
+							end
+						end
+						y = {
+							"date" => Time.now.to_s,
+							"hostname" => `hostname -f`.strip,
+							"container" => pImage,
+							"cmdline" => ARGV[1..-1],
+						}
+						headers = y.keys.clone
+						fList.each do |k, v|
+							y[k] = v.sort.uniq
+						end
+						ppth = "../profile/#{CMD_NAME}"
+						pFile = "#{ppth}/#{Time.now.strftime('%y-%m-%d_%H:%M:%S.%L')}"
+						FileUtils.mkpath(ppth)
+						IO.write pFile, YAML.dump(y)
+
+						finalProf = ppth + "/#{CMD_NAME}.profile"
+						fp = YAML.load(IO.read(finalProf)) rescue {}
+						
+						all = Hash.new{|h, k| h[k] = []}
+						Dir.each_child ppth do |f|
+							if f != "#{CMD_NAME}.profile"
+								z = YAML.load(IO.read(ppth + "/" + f))
+								z.each do |k, v|
+									all[k] += v if !headers.include?(k)
+								end
+							end
+						end
+
+						dpath = Hash.new{|h, k| h[k] = {}}
+						[
+							["file", %W{mount dir}, false],
+							["write", %W{mount}, false],
+							["dir", %W{mount}, false],
+							["dir", %W{dir}, true]
+						].each do |mode, dpks, onlyOrig|
+							all[mode].sort!.uniq!
+							all[mode].delete_if do |e|
+								DPATH["ignore"].include?(e) or (
+									dpks.detect do |px|
+										(DPATH[px] + (onlyOrig ? [] : (fp[px] || []))).detect{ e == _1 || e[0.._1.size] == _1 + "/" }
+											&.tap{ dpath[px][_1] = true }
+									end
+								)
+							end
+						end
+						MOUNT_HOST.each do |m|
+							all["erased"].sort.uniq.detect{ _1 == m || _1[0..m.size] == m + "/" }
+								&.tap{ dpath["mount"][m] = true }
+						end
+						fp["read"] ||= []
+						fp["dir"] ||= []
+						fp["write"] ||= []
+						fp["mount"] ||= []
+						[
+							fp["read"] += (all["file"] || []),
+							fp["dir"] += (all["dir"] || []) + dpath["dir"].keys,
+							fp["write"] += (all["write"] || []) + (all["rename"] || []),
+							fp["mount"] += (all["mount"] || []) + dpath["mount"].keys,
+						].each{ _1.sort!.uniq! }
+						FileUtils.mv finalProf, finalProf + ".bak", force: true
+						IO.write finalProf, YAML.dump(fp)
+					end
+				end
+			end
+			if !kid || !wpid
+				die "cannot detect process"
+			end
+			Process.waitpid
+		ensure
+			silentDocker["stop"]
+		end
+	end
+	Process.waitpid
+	exit
+end
+
+
+
+CMD = ARGV[0]
+
+if ARGV.size < 1
+	die "Usage: #{File.basename __FILE__} USER"
+end
+
+
+TMP_BASE = "/tmp/dexec"
+TMP_ROOT = "/tmp/dexec/#{File.basename __FILE__}_#{$$}"
+
+
+#system "docker-compose down"
+
+
+conf = eval IO.read("/etc/docker/daemon.json").gsub(/null/, "nil") rescue nil
+uname, gname = conf&.is_a?(Hash) && conf[:"userns-remap"]&.split(/:/)
+gname ||= uname
+ustart, gstart = nil
+urange, grange = nil
+if uname
+	[[uname, "u"], [gname, "g"]].each do |name, x|
+		start, range = nil
+		if (IO.read("/etc/sub#{x}id") rescue nil)&.split&.detect{|e| n, start, range = e.split(/:/); n == name}
+			eval "#{x}start = #{start}"
+			eval "#{x}range = #{range}"
+		end
+	end
+end
+
+C = File.basename(CMD)
+begin
+	PROF = YAML.load(IO.read("profile/#{C}/#{C}.profile"))
+rescue
+	die <<~END
+		Cannot read profile for '#{CMD}'.
+		Please create profile by executeing '#{$0} --get-profile #{ARGV[1..-1].join(' ')}'.
+	END
+end
+
+
+
+FileUtils.mkpath TMP_ROOT
+
+Mount.retrieve LOADERS + PROF["read"], TMP_ROOT
+Mount.retrieve PROF["dir"], TMP_ROOT, recursive: true
+
+PROF["mount"].each{ 
+	FileUtils.mkpath TMP_ROOT + _1
+}
+
+
+if ustart
+	system *%W{chown -R #{ustart}:#{gstart} #{TMP_ROOT}}
+end
+
+
+#if lns = IO.read(dst = TMP_ROOT + "/etc/login.defs") rescue nil
+#	lns.gsub /^([UG]ID_MIN\s+)\d+/, "\\1#{UM_SAIDAI}"
+#	IO.write(dst, lns)
+#end
+
+
+require 'digest'
+
+
+def systemx *args
+	system *args
+	#print args.join(' ') + "\n"
+end
+
+
+def systemz *args
+	i = -1
+	:failed != while !system *args
+				sleep 1
+				break :faled if (i += 1) >= 10
+			end
+end
+
+
+def one ag
+	fs, mode = ag
+	if fs.is_a? Array
+		fs[0]
+	else
+		fs
+	end
+end
+
+PROF["mount"].each do |mpth|
+	if MOUNT_HOST.include? mpth
+		systemx *%W{mount --bind #{mpth} #{TMP_ROOT}#{mpth}}
+	else
+		systemx *%W{mount --bind #{Mount.getOneFor(mpth)} #{TMP_ROOT}#{mpth}}
+	end
+end
+
+md5List = {}
+
+
+PROF["write"].each do |ef|
+	eft = TMP_ROOT + ef
+	if File.exist? eft
+		md5 = Digest::MD5.new
+		md5 << IO.read(eft)
+		md5List[ef] = md5.hexdigest
+	else
+		md5List[ef] = nil
+	end
+end
+
+
+require 'shellwords'
+
+unmount_fail = false
+begin
+	if ustart
+		fnpid, fngo = nil
+		%W{go pid}.each do |tag|
+			eval "fn#{tag} = '#{TMP_ROOT}/fn#{tag}'"
+			system *%W{mkfifo #{eval "fn#{tag}"}}
+			system *%W{chown #{ustart}:#{gstart} #{eval "fn#{tag}"}}
+		end
+		fork do
+			Process.gid = Process.egid = gstart
+			Process.uid = Process.euid = ustart
+			STDERR.flush
+			exec "unshare --user bash -c '
+				echo $$ > #{fnpid}
+				cat #{fngo} > /dev/null
+				lsr $$
+				chroot #{TMP_ROOT} #{CMD} #{ARGV.shelljoin}
+				echo $$ > #{fnpid}
+			'
+			"
+		end
+		pid = IO.read(fnpid).to_i
+		%W{u g}.each do |x|
+			IO.write "/proc/#{pid}/#{x}id_map", "0 #{eval x + 'start'} #{eval x + 'range'}\n"
+		end
+		IO.write fngo, "have set id map.\n"
+		IO.read(fnpid)
+	else
+		#print "strace -f -o /tmp/chroot.strace chroot #{TMP_ROOT} #{ARGV.shelljoin}\n"
+		system "strace -f -o /tmp/dexec/chroot.strace chroot #{TMP_ROOT} #{ARGV.shelljoin}"
+	end
+ensure
+	PROF["mount"].reverse.each do |mpth|
+		if !systemz *%W{umount #{TMP_ROOT}/#{mpth}}
+			unmount_fail = true
+		end
+	end
+end
+
+
+require 'fileutils'
+
+
+PROF["write"].each do |ef|
+	md5 = Digest::MD5.new
+	if File.exist?(eft = TMP_ROOT + ef)
+		md5 << IO.read(eft)
+		if md5List[ef] != md5.hexdigest
+			Mount.unretrieve ef, TMP_ROOT
+		end
+	end
+end
+
+
+IO.read('/proc/self/mountinfo').each_line do |ln|
+	if (to_um = ln.split[4]) =~ /^#{Regexp.escape TMP_ROOT}/
+		print "umount #{to_um} ... "
+		STDOUT.flush
+		if !system "umount #{to_um}"
+			print "failed\n"
+			STDOUT.flush
+			unmount_fail = true
+		else
+			print "done\n"
+		end
+	end
+end
+
+
+if !unmount_fail
+	system *%W{rm -rf --one-file-system #{TMP_BASE}}
+end
+
+

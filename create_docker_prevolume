@@ -1,0 +1,228 @@
+#!/usr/bin/env ruby
+
+
+if Process.euid != 0
+	exec "sudo", $0, *ARGV
+end
+
+PVOLS = "./prevolumes"
+
+def die msg
+	STDERR.write(msg + "\n")
+	exit 1
+end
+
+if !File.exist?(PVOLS)
+	die "Error: cannot open #{PVOLS}."
+end
+
+class EachPVol
+	attr_accessor :target, :source_file
+	def get_source_file prefix
+		@source_file || (
+			m = @target[0] != "/" ? "/" : "";
+			prefix + m + @target
+		)
+	end
+	def initialize t, s
+		@target = t
+		@source_file = s
+	end
+end
+
+
+PVols = {}
+
+File.open(PVOLS) do |fr|
+	fr.each_line do |ln|
+		t, s = ln.strip.split
+		PVols[t] = EachPVol.new(t, s)
+	end
+end
+
+
+require 'yaml'
+Y = YAML.load(IO.read "./docker-compose.yml")
+
+curDirTag = File.basename(Dir.pwd)
+
+YPVols = {}
+svs = Y["services"]
+sv = svs.keys[0]
+svs[sv]["volumes"] ||= []
+(vs = svs[sv]["volumes"]).each do |e|
+	t, s = e.split(/:/).map(&:strip).reverse
+	YPVols[t] = EachPVol.new(t, s)
+end
+
+newVols = (PVols.keys - YPVols.keys)
+
+if !newVols.empty?
+	(PVols.keys - YPVols.keys).each do |e|
+		e = PVols[e]
+		vs.push e.get_source_file("/home/data/#{sv}") + ":" + e.target
+	end
+	IO.write "./docker-compose.yml", YAML.dump(Y)
+end
+
+YPVols.clear
+vs.each do |e|
+	t, s = e.split(/:/).map(&:strip).reverse
+	YPVols[t] = EachPVol.new(t, s)
+end
+
+
+Insp = eval `docker inspect #{curDirTag}-#{sv}`.gsub(/null/, "nil")
+data =Insp[0][:GraphDriver][:Data]
+roots = data[:LowerDir].split(/:/).reverse
+roots.push data[:UpperDir]
+
+
+def mkpath pth
+	if !File.exist? pth
+		mkpath File.dirname(pth)
+		Dir.mkdir pth
+	end
+end
+
+
+system "docker-compose down"
+
+
+YPVols.each_value do |pv|
+	tgts = []
+	roots.reverse.each do |r|
+		tgt = r + pv.target
+		if File.exist?(tgt)
+	  	  	tgts.push tgt
+		end
+	end
+	tgts.each do |tgt|
+		if File.directory?(pv.source_file)
+			if !File.directory?(tgt) || Dir.children(pv.source_file).empty?
+				Dir.rmdir(pv.source_file)
+			else
+				cp_above = true
+			end
+		elsif !File.exist?(pv.source_file) # /home/data/...
+			if !File.exist?(d = File.dirname(pv.source_file))
+				mkpath d
+			end
+		end
+		if pv.target == "/etc/login.defs"
+			um_saidai = 1000
+			Dir.glob("/home/data/*/etc/login.defs").each do |f|
+				if IO.read(f) =~ /^UID_MIN\s+(\d+)/
+					if um_saidai < (um = $1.to_i)
+						um_saidai = um
+					end
+				end
+			end
+			um_saidai += 1000
+			lns = IO.read(tgt).gsub /^([UG]ID_MIN\s+)\d+/, "\\1#{um_saidai}"
+			IO.write(tgt, lns)
+		end
+		dst = pv.source_file + (cp_above ? "/.." : "")
+		system "cp -arnv #{tgt} #{dst}\n"
+	end
+end
+
+
+exit 0
+
+
+HOST_SSH_PORT = IO.read("/etc/ssh/sshd_config")[/^\s*Port\s+(\d+)/, 1]
+HOST_IP = `ip a`[/docker\-sys:.*?inet\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\//m, 1]
+
+
+def get_it
+	s = "\n"
+	PVols.each_key do |k|
+		if e = YPVols[k]
+			s << <<LNE
+	if [ ! -e #{e.source_file} ]; then
+		echo #{e.target} #{e.source_file}
+	fi
+LNE
+		end
+	end
+	s
+end
+
+
+if !File.exist?("./get_prevolume")
+	if !File.exist?("./#{sv}_id")
+		system 'ssh-keygen -t ed25519 -N "" -C '"#{sv}.create_prevolume"' -f '"./#{sv}_id"
+	end
+	pkey = IO.read("./#{sv}_id.pub").strip
+	ekey = ""
+	IO.read("./#{sv}_id").each_byte do |b|
+		ekey << if 0x30 <= b && b <= 0x39 || 0x41 <= b && b <= 0x5a || 0x61 <= b && b <= 0x7a
+			        b.chr
+		        else
+					x = b.to_s(16)
+					'\x' + (x.size == 1 ? '0' : '') + x
+				end
+	end
+	akf = File.expand_path("~/.ssh/authorized_keys")
+	if !File.exist?(akf)
+		Dir.mkdir(d = File.dirname(akf), 0700)
+		File.open akf, "w" do
+		end
+		File.chmod 0644, akf
+	end
+	File.open akf, "r+" do |fd|
+		if :broken != fd.each_line do |ln|
+						  break :broken if ln.strip == pkey
+					  end
+			if fd.tell != 0
+				fd.seek(-1, IO::SEEK_END)
+				if fd.read(1) != "\n"
+					fd.write "\n"
+				end
+			end
+			fd.write pkey + "\n"
+		end
+	end
+	File.open "./get_prevolume", "w" do |fw|
+		fw.write <<~ENDS
+			#!/bin/bash
+			
+			do_ssh(){
+				ssh -p #{HOST_SSH_PORT} -q -o "PasswordAuthentication no" -o "StrictHostKeyChecking no" -o "UserKnownHostsFile /dev/null" -l rancher #{HOST_IP} $@
+			}
+			do_scp(){
+				do_ssh '
+					
+				'
+				scp -P #{HOST_SSH_PORT} -o "PasswordAuthentication no" -o "StrictHostKeyChecking no" -o "UserKnownHostsFile /dev/null" -r $0 rancher@#{HOST_IP}:$1
+			}
+			
+			if [ "$1" = "get" ]; then#{get_it}
+			else
+				# prepare ssh key
+				if [ !-e /root/.ssh/id_ed25519 ]
+					mkdir -p /root/.ssh
+					chmod 700 /root/.ssh
+					echo "#{ekey}" > /root/.ssh/id_ed25519
+					chmod 600 /root/.ssh/id_ed25519
+				fi
+			
+				read -ra PARAMS <<< "`do_ssh #{File.expand_path("./get_prevolume")} get`"
+				mode="0"
+				for i in "${PARAMS[@]}";do
+					if [ $mode = 0 ];then
+						t=$i
+						mode=1
+					else
+						s=$i
+						do_scp $t $s
+						mode=0
+					fi
+				done
+			fi
+		ENDS
+	end
+end
+
+
