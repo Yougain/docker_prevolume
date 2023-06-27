@@ -36,11 +36,11 @@ fi
 
 
 sudo $IST -y install vim ruby zsh make gcc ruby-$DVP git git-extras ncurses-$DVP $APKG
-sudo gem install binding_of_caller curses
-sudo gem install -N YkLib
+sudo gem update binding_of_caller curses
+sudo gem update -N YkLib
 git-force-clone  https://github.com/Yougain/docker_prevolume.git ~/docker_prevolume
 
 
-sudo cp $HOME/docker_prevolume/{dexec,create_docker_prevolume,docker_volumes.rb} /usr/bin
+sudo cp -af $HOME/docker_prevolume/{dexec,create_docker_prevolume,docker_volumes.rb} /usr/bin
 
 
