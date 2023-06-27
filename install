@@ -35,7 +35,7 @@ if [ ! -f /bin/which -a ! -f /usr/bin/which ];then
 fi
 
 
-sudo $IST -y install vim ruby zsh make gcc ruby-$DVP git git-extras ncurses-$DVP $APKG
+sudo $IST -y install strace vim ruby zsh make gcc ruby-$DVP git git-extras ncurses-$DVP $APKG
 sudo gem update binding_of_caller curses
 sudo gem update -N YkLib
 git-force-clone  https://github.com/Yougain/docker_prevolume.git ~/docker_prevolume

@@ -60,15 +60,7 @@ if ARGV[0] == "--get-profile"
 								src = src[1..-1]
 							end
 							Mount.mkpath File.dirname(src), File.basename(src)
-							begin
-								p.red src
-								FileUtils.cp_r("../" + src, ".")
-								#FileUtils.cp_r("../" + src, ".", {remove_destination: true, preserve: true})
-								p.red
-							rescue
-								print $!.inspect + "\n"
-								raise $!
-							end
+							FileUtils.cp_r("../" + src, ".", {remove_destination: true, preserve: true})
 						end
 					end
 					Process.waitpid
@@ -79,9 +71,8 @@ if ARGV[0] == "--get-profile"
 						raise "Failed: docker run --name #{pImage} -d #{pImage}"
 					end
 				end
-			rescue Exception => e
-				p e
-				exit 1
+			rescue Exception
+				raise $!
 			else
 				pwd = nil
 			end
