@@ -60,7 +60,12 @@ if ARGV[0] == "--get-profile"
 								src = src[1..-1]
 							end
 							Mount.mkpath File.dirname(src), File.basename(src)
-							FileUtils.cp_r "../" + src, ".", remove_destination: true, preserve: true
+							begin
+								FileUtils.cp_r "../" + src, ".", remove_destination: true, preserve: true
+							rescue
+								print $!.inspect
+								raise $!
+							end
 						end
 					end
 					Process.waitpid
