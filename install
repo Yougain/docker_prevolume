@@ -6,12 +6,6 @@ if [ -n "$1" ];then
 fi
 
 
-if [ -f /bin/zsh ];then
-	echo "zsh installed. exit."
-	exit 1
-fi
-
-
 APKG_R="redhat-rpm-config epel-release glibc-locale-source langpacks-en glibc-langpack-en"
 if [ -f /bin/dnf -o -f /usr/bin/dnf ];then
 	IST="dnf"
@@ -44,7 +38,7 @@ fi
 sudo $IST -y install vim ruby zsh make gcc ruby-$DVP git git-extras ncurses-$DVP $APKG
 sudo gem install binding_of_caller curses
 sudo gem install -N YkLib
-#git-force-clone  https://github.com/Yougain/docker_prevolume.git ~/docker_prevolume
+git-force-clone  https://github.com/Yougain/docker_prevolume.git ~/docker_prevolume
 
 
 sudo cp $HOME/docker_prevolume/{dexec,create_docker_prevolume,docker_volumes.rb} /usr/bin
