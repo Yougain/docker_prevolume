@@ -44,29 +44,43 @@ if ARGV[0] == "--get-profile"
 			FileUtils.cp "Dockerfile", PROFILING_D
 			lns = IO.read(PROFILING_D + "/Dockerfile").lines
 		end
-		Dir.chdir PROFILING_D
-		pImage = "#{Mount::ImageName}-for_profile"
-		if new
-			unless lns.detect{ _1 =~ /^ENTRYPOINT\b/ } ==  DUM_EP
-				IO.write "Dockerfile", lns.join.sub(/(^ENTRYPOINT.*?$)|\Z/, DUM_EP)
-			end
-			fork do
-				lns.select{ _1 =~ /^COPY\b/ }.each do |ln|
-					src = ln.split[1]
-					if src[0] == "/"
-						src = src[1..-1]
+		pwd = Dir.pwd
+		begin
+			Dir.chdir PROFILING_D
+			begin
+				pImage = "#{Mount::ImageName}-for_profile"
+				if new
+					unless lns.detect{ _1 =~ /^ENTRYPOINT\b/ } ==  DUM_EP
+						IO.write "Dockerfile", lns.join.sub(/(^ENTRYPOINT.*?$)|\Z/, DUM_EP)
 					end
-					Mount.mkpath File.dirname(src), File.basename(src)
-					begin
-						FileUtils.cp_r "../" + src, ".", remove_destination: true, preserve: true
-					rescue ArgumentError => e
-						p e
+					fork do
+						lns.select{ _1 =~ /^COPY\b/ }.each do |ln|
+							src = ln.split[1]
+							if src[0] == "/"
+								src = src[1..-1]
+							end
+							Mount.mkpath File.dirname(src), File.basename(src)
+							FileUtils.cp_r "../" + src, ".", remove_destination: true, preserve: true
+						end
+					end
+					Process.waitpid
+					if !system *%W{docker buildx build --load -t #{pImage} .}
+						raise "Failed: docker buildx build --load -t #{pImage} .}"
+					end
+					if !system *%W{docker run --name #{pImage} -d #{pImage}}
+						raise "Failed: docker run --name #{pImage} -d #{pImage}"
 					end
 				end
+			rescue Exception => e
+				p e
+			else
+				pwd = nil
 			end
-			Process.waitpid
-			system *%W{docker buildx build --load -t #{pImage} .}
-			system *%W{docker run --name #{pImage} -d #{pImage}}
+		ensure
+			if pwd
+				Dir.chdir pwd
+				FileUtils.rm_rf PROFILING_D
+			end
 		end
 		silentDocker = -> cmd {
 			cmd = cmd.gsub!(/\%i/, pImage) || cmd + " " + pImage
