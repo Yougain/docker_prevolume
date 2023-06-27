@@ -342,7 +342,7 @@ class ChrootFS
 							followList.each do |follow|
 								findRootOf follow do |r|
 									if (follow.unchroot r).directory?
-										resolvBase(follow, "**/". (lkList&.clone || []).push(k.lino)).each do |reresolved|
+										resolvBase(follow / "**/", symlinks, (lkList&.clone || []).push(k.lino)).each do |reresolved|
 											resList.add reresolved
 										end
 									end
