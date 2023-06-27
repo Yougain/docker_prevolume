@@ -62,7 +62,8 @@ if ARGV[0] == "--get-profile"
 							Mount.mkpath File.dirname(src), File.basename(src)
 							begin
 								p.red src
-								FileUtils.cp_r("../" + src, ".", {remove_destination: true, preserve: true})
+								FileUtils.cp_r("../" + src, ".")
+								#FileUtils.cp_r("../" + src, ".", {remove_destination: true, preserve: true})
 								p.red
 							rescue
 								print $!.inspect + "\n"
